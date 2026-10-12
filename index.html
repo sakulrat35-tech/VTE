@@ -29,7 +29,7 @@ label.field{display:block;font-size:14px;color:var(--muted)}input[type=text],inp
 .save-status.err{display:block;background:#fee2e2;color:#991b1b}
 button{border:0;border-radius:9px;padding:10px 14px;font:inherit;font-weight:700;cursor:pointer}.primary{background:var(--blue);color:white}.secondary{background:#eaf1f5;color:var(--navy)}.danger{background:#fff0ef;color:#a22b2b}.buttons{display:flex;gap:8px;flex-wrap:wrap}
 table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}th{color:var(--navy);background:var(--pale)}
-.history-row button{padding:6px 9px;font-size:12px;margin:2px}.empty{color:var(--muted);font-size:14px;padding:10px 0}
+.history-row button{padding:6px 9px;font-size:12px;margin:2px}.high-risk-row{background:#fee2e2;color:#991b1b;font-weight:700}.high-risk-score{display:inline-block;background:#dc2626;color:#fff;border-radius:7px;padding:4px 8px;font-weight:800}.empty{color:var(--muted);font-size:14px;padding:10px 0}
 .note{font-size:13px;color:var(--muted)}.warning{background:#fff8e8;border:1px solid #f0d99e;border-radius:10px;padding:12px;font-size:13px}
 @media(max-width:600px){.wrap{padding:12px}.panel{padding:13px}.items{grid-template-columns:1fr}.sticky{align-items:flex-start}.score{font-size:28px}table{display:block;overflow-x:auto;white-space:nowrap}}
 </style>
@@ -40,6 +40,22 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 <p>แบบประเมินปัจจัยเสี่ยงต่อการเกิดภาวะหลอดเลือดดำอุดตัน (VTE: DVT/PE)</p>
 </div></header>
 <main class="wrap">
+
+<section class="panel" id="sharedSetup">
+  <h2>ตั้งค่าประวัติส่วนกลาง</h2>
+  <p class="note">เชื่อมฐานข้อมูลออนไลน์เพื่อให้ผู้ใช้ที่ตั้งค่า URL และ key ชุดเดียวกันเห็นประวัติร่วมกัน หากยังไม่ตั้งค่า ระบบจะเก็บประวัติไว้เฉพาะเครื่องนี้</p>
+  <div class="fields">
+    <label class="field">Supabase Project URL<input id="sbUrl" type="text" placeholder="https://xxxxxxxx.supabase.co"></label>
+    <label class="field">Supabase anon/public key<input id="sbKey" type="text" placeholder="วาง anon/public key ของโปรเจกต์"></label>
+  </div>
+  <div class="buttons" style="margin-top:10px">
+    <button class="primary" id="saveSharedConfig">เชื่อมต่อ / บันทึกการตั้งค่า</button>
+    <button class="secondary" id="refreshShared">รีเฟรชประวัติส่วนกลาง</button>
+  </div>
+  <div id="sharedStatus" class="save-status" role="status"></div>
+  <p class="warning"><strong>ความเป็นส่วนตัว:</strong> ตัวอย่างนี้ใช้สิทธิ์ฐานข้อมูลแบบสาธารณะเพื่อให้เริ่มใช้ฟรีได้ง่าย ผู้ที่มี URL และ key อาจเข้าถึงข้อมูลในตารางได้ ห้ามบันทึกชื่อ-นามสกุล HN จริง หรือข้อมูลที่ระบุตัวผู้ป่วยได้ ใช้รหัสสมมติเท่านั้น และให้หน่วยงานตรวจสอบความปลอดภัย/PDPA ก่อนใช้งานจริง</p>
+</section>
+
 <section class="panel">
 <h2>ข้อมูลผู้ป่วยและการประเมิน</h2>
 <div class="fields">
@@ -196,7 +212,53 @@ const groups = [
 ]}
 ];
 document.querySelectorAll('#checklist input[type=checkbox]').forEach(cb=>cb.addEventListener('change',updateScore));
+
 const $=id=>document.getElementById(id);
+const SB_URL_KEY='capriniSupabaseUrlV1', SB_ANON_KEY='capriniSupabaseAnonKeyV1';
+function sbConfig(){return {url:localStorage.getItem(SB_URL_KEY)||'',key:localStorage.getItem(SB_ANON_KEY)||''}}
+function sbReady(){const c=sbConfig();return /^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(c.url) && c.key.length>20}
+function showSharedStatus(msg,ok=true){const el=$('sharedStatus');if(!el)return;el.className='save-status '+(ok?'ok':'err');el.textContent=msg}
+async function sbRequest(path,options={}){
+ const c=sbConfig(); if(!sbReady()) throw new Error('ยังไม่ได้ตั้งค่า Supabase');
+ const url=c.url.replace(/\/$/,'')+'/rest/v1/'+path;
+ const res=await fetch(url,{...options,headers:{apikey:c.key,Authorization:'Bearer '+c.key,'Content-Type':'application/json',Prefer:'return=representation',...(options.headers||{})}});
+ if(!res.ok) throw new Error('ฐานข้อมูลตอบกลับ '+res.status+': '+(await res.text()).slice(0,220));
+ const t=await res.text();return t?JSON.parse(t):[];
+}
+async function remoteList(kind){
+ const rows=await sbRequest('shared_records?select=id,record_type,payload,created_at&record_type=eq.'+encodeURIComponent(kind)+'&order=created_at.desc');
+ return rows.map(x=>({...x.payload,id:x.id,_remote:true}));
+}
+async function remoteSave(kind,record){
+ const payload={...record}; delete payload._remote;
+ const body={id:String(record.id),record_type:kind,payload,created_at:new Date().toISOString()};
+ await sbRequest('shared_records?on_conflict=id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=representation'},body:JSON.stringify(body)});
+}
+async function remoteDelete(id){await sbRequest('shared_records?id=eq.'+encodeURIComponent(id),{method:'DELETE',headers:{Prefer:'return=minimal'}})}
+async function listRecords(kind,localKey){
+ if(sbReady()) return await remoteList(kind);
+ try{return JSON.parse(localStorage.getItem(localKey)||'[]')}catch(e){return []}
+}
+async function saveRecord(kind,record,localKey){
+ if(sbReady()){await remoteSave(kind,record);return}
+ const a=JSON.parse(localStorage.getItem(localKey)||'[]');a.push(record);localStorage.setItem(localKey,JSON.stringify(a));
+}
+async function deleteRecord(kind,id,localKey){
+ if(sbReady()){await remoteDelete(id);return}
+ const a=JSON.parse(localStorage.getItem(localKey)||'[]').filter(x=>x.id!==id);localStorage.setItem(localKey,JSON.stringify(a));
+}
+function initSharedConfig(){
+ const c=sbConfig();$('sbUrl').value=c.url;$('sbKey').value=c.key;
+}
+$('saveSharedConfig').onclick=async()=>{
+ const url=$('sbUrl').value.trim().replace(/\/$/,'');const key=$('sbKey').value.trim();
+ if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)||key.length<20){showSharedStatus('กรุณาตรวจสอบ Project URL และ anon/public key ให้ถูกต้อง',false);return}
+ localStorage.setItem(SB_URL_KEY,url);localStorage.setItem(SB_ANON_KEY,key);
+ try{await sbRequest('shared_records?select=id&limit=1');showSharedStatus('เชื่อมต่อฐานข้อมูลส่วนกลางสำเร็จ');await renderHistory();await renderCareHistory()}
+ catch(e){showSharedStatus('เชื่อมต่อไม่สำเร็จ: '+e.message+' — ตรวจ SQL, URL และ key',false)}
+};
+$('refreshShared').onclick=async()=>{try{await renderHistory();await renderCareHistory();showSharedStatus(sbReady()?'รีเฟรชประวัติส่วนกลางแล้ว':'ยังไม่ได้ตั้งค่าฐานข้อมูล จะแสดงเฉพาะประวัติในเครื่อง',true)}catch(e){showSharedStatus('โหลดประวัติไม่สำเร็จ: '+e.message,false)}};
+
 function selected(){return [...document.querySelectorAll('#checklist input:checked')].map(x=>({label:x.dataset.label,points:Number(x.dataset.points)}))}
 function score(){return selected().reduce((s,x)=>s+x.points,0)}
 function riskInfo(n){
@@ -211,67 +273,83 @@ function updateScore(){
  const count=selected().length;if($('selectedCount'))$('selectedCount').textContent=`เลือกแล้ว ${count} ข้อ`;
  document.querySelectorAll('#checklist .item').forEach(lab=>{const cb=lab.querySelector('input');lab.classList.toggle('selected',cb.checked)});
 }
+
 function getHistory(){try{return JSON.parse(localStorage.getItem('capriniHistoryV1')||'[]')}catch(e){return []}}
 function setHistory(a){localStorage.setItem('capriniHistoryV1',JSON.stringify(a))}
+
 function formData(){return {id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),hn:$('hn').value.trim(),patientName:$('patientName').value.trim(),patientAge:$('patientAge').value.trim(),diagnosis:$('diagnosis').value.trim(),bed:$('bed').value.trim(),ward:$('ward').value.trim(),date:$('date').value||new Date().toISOString().slice(0,10),assessor:$('assessor').value.trim(),notes:$('notes').value.trim(),score:score(),factors:selected(),savedAt:new Date().toLocaleString('th-TH')}}
-function renderHistory(){
- const a=getHistory().sort((x,y)=>y.id.localeCompare(x.id));const root=$('history');root.innerHTML='';
+
+let currentHistory=[];
+async function renderHistory(){
+ const root=$('history');root.innerHTML='<div class="empty">กำลังโหลดประวัติ…</div>';
+ let a;try{a=await listRecords('assessment','capriniHistoryV1');currentHistory=a}catch(e){root.innerHTML='<div class="empty">โหลดประวัติไม่สำเร็จ: '+e.message+'</div>';return}
+ a.sort((x,y)=>String(y.savedAt||y.date||'').localeCompare(String(x.savedAt||x.date||'')));root.innerHTML='';
  if(!a.length){root.innerHTML='<div class="empty">ยังไม่มีประวัติการประเมิน</div>';return}
  const table=document.createElement('table');table.innerHTML='<thead><tr><th>วันที่</th><th>HN/รหัส</th><th>คะแนน</th><th>ผู้ประเมิน</th><th>จัดการ</th></tr></thead>';
  const body=document.createElement('tbody');
- a.forEach(r=>{const tr=document.createElement('tr');tr.className='history-row';
-  const values=[r.date,r.hn||'-',r.score,r.assessor||'-'];values.forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.appendChild(td)});
+ a.forEach(r=>{const tr=document.createElement('tr');tr.className='history-row'+(Number(r.score)>=5?' high-risk-row':'');
+  const values=[r.date,r.hn||'-',r.score,r.assessor||'-'];values.forEach((v,i)=>{const td=document.createElement('td');if(i===2&&Number(r.score)>=5){const badge=document.createElement('span');badge.className='high-risk-score';badge.textContent=String(v)+' คะแนน · เสี่ยงสูง';td.appendChild(badge)}else td.textContent=v;tr.appendChild(td)});
   const td=document.createElement('td');const view=document.createElement('button');view.className='secondary';view.textContent='เปิดดู';view.onclick=()=>loadRecord(r.id);
-  const del=document.createElement('button');del.className='danger';del.textContent='ลบ';del.onclick=()=>{if(confirm('ลบรายการนี้ใช่หรือไม่?')){setHistory(getHistory().filter(x=>x.id!==r.id));renderHistory()}};
+  const del=document.createElement('button');del.className='danger';del.textContent='ลบ';del.onclick=async()=>{if(confirm('ลบรายการนี้ใช่หรือไม่?'+(sbReady()?' การลบจะมีผลกับผู้ใช้ทุกคน':''))){try{await deleteRecord('assessment',r.id,'capriniHistoryV1');await renderHistory()}catch(e){alert('ลบไม่สำเร็จ: '+e.message)}}};
   td.append(view,del);tr.appendChild(td);body.appendChild(tr);
- });table.appendChild(body);root.appendChild(table);
+ });table.appendChild(body);root.appendChild(table)
 }
-function loadRecord(id){const r=getHistory().find(x=>x.id===id);if(!r)return;
+
+function loadRecord(id){const r=(currentHistory||[]).find(x=>x.id===id)||getHistory().find(x=>x.id===id);if(!r)return;
  $('hn').value=r.hn||'';$('patientName').value=r.patientName||'';$('patientAge').value=r.patientAge||'';$('diagnosis').value=r.diagnosis||'';$('bed').value=r.bed||'';$('ward').value=r.ward||'';$('date').value=r.date||'';$('assessor').value=r.assessor||'';$('notes').value=r.notes||'';
  document.querySelectorAll('#checklist input').forEach(x=>x.checked=r.factors.some(f=>f.label===x.dataset.label));updateScore();window.scrollTo({top:0,behavior:'smooth'});
 }
-$('save').onclick=()=>{
+
+$('save').onclick=async()=>{
  const status=$('saveStatus');status.className='save-status';status.textContent='';
  const r=formData();
  try{
-  const a=getHistory();a.push(r);setHistory(a);
-  const verify=getHistory();
-  if(!verify.some(x=>x.id===r.id))throw new Error('ไม่พบข้อมูลหลังบันทึก');
-  renderHistory();status.className='save-status ok';
-  status.textContent=`บันทึกสำเร็จ · คะแนน ${r.score} · เลือก ${r.factors.length} ข้อ · ประวัตินี้เก็บในอุปกรณ์/เบราว์เซอร์นี้`;
- }catch(e){
-  status.className='save-status err';
-  status.textContent='บันทึกไม่สำเร็จในเบราว์เซอร์นี้ หากเปิดไฟล์ผ่านแอป Files/หน้าพรีวิว ให้ดาวน์โหลดแล้วเปิดผ่าน Safari หรือเผยแพร่เว็บไซต์ผ่าน HTTPS ก่อนใช้งาน หากต้องการดูประวัติจากหลายเครื่อง ต้องเชื่อมฐานข้อมูลออนไลน์';
- }
+  await saveRecord('assessment',r,'capriniHistoryV1');
+  await renderHistory();status.className='save-status ok';
+  status.textContent=`บันทึกสำเร็จ · คะแนน ${r.score} · ${sbReady()?'บันทึกในฐานข้อมูลส่วนกลาง':'บันทึกเฉพาะอุปกรณ์นี้'}`;
+ }catch(e){status.className='save-status err';status.textContent='บันทึกไม่สำเร็จ: '+e.message}
 }
+
 $('clear').onclick=()=>{if(confirm('ล้างข้อมูลและตัวเลือกที่กรอกอยู่หรือไม่?')){['hn','ward','assessor','notes'].forEach(id=>$(id).value='');$('date').value=new Date().toISOString().slice(0,10);document.querySelectorAll('#checklist input').forEach(x=>x.checked=false);updateScore()}}
-$('deleteAll').onclick=()=>{if(confirm('ยืนยันลบประวัติทั้งหมดจากเบราว์เซอร์นี้?')){setHistory([]);renderHistory()}}
-$('export').onclick=()=>{const a=getHistory();if(!a.length){alert('ยังไม่มีประวัติให้ส่งออก');return}
+$('deleteAll').onclick=async()=>{if(confirm(sbReady()?'ยืนยันลบประวัติการประเมินส่วนกลางทั้งหมด? ผู้ใช้ทุกคนจะไม่เห็นประวัติเหล่านี้อีก':'ยืนยันลบประวัติทั้งหมดจากเบราว์เซอร์นี้?')){try{if(sbReady()){const a=await remoteList('assessment');for(const r of a)await remoteDelete(r.id)}else setHistory([]);await renderHistory()}catch(e){alert('ลบไม่สำเร็จ: '+e.message)}}}
+
+$('export').onclick=async()=>{const a=await listRecords('assessment','capriniHistoryV1');if(!a.length){alert('ยังไม่มีประวัติให้ส่งออก');return}
  const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
- const rows=[['วันที่','HN/รหัส','ชื่อผู้ป่วย','อายุ','การวินิจฉัย','เตียง','หอผู้ป่วย','ผู้ประเมิน','คะแนนรวม','ปัจจัยเสี่ยง','บันทึกเพิ่มเติม','เวลาที่บันทึก'],...a.map(r=>[r.date,r.hn,r.patientName,r.patientAge,r.diagnosis,r.bed,r.ward,r.assessor,r.score,r.factors.map(f=>`${f.label} (${f.points})`).join('; '),r.notes,r.savedAt])];
+ const rows=[['วันที่','HN/รหัส','ชื่อผู้ป่วย','อายุ','การวินิจฉัย','เตียง','หอผู้ป่วย','ผู้ประเมิน','คะแนนรวม','ปัจจัยเสี่ยง','บันทึกเพิ่มเติม','เวลาที่บันทึก'],...a.map(r=>[r.date,r.hn,r.patientName,r.patientAge,r.diagnosis,r.bed,r.ward,r.assessor,r.score,(r.factors||[]).map(f=>`${f.label} (${f.points})`).join('; '),r.notes,r.savedAt])];
  const csv='\ufeff'+rows.map(row=>row.map(esc).join(',')).join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download='Caprini_Score_History.csv';link.click();URL.revokeObjectURL(url);
-}
+};
+
+
 
 function getCareHistory(){try{return JSON.parse(localStorage.getItem('capriniCareHistoryV1')||'[]')}catch(e){return []}}
 function setCareHistory(a){localStorage.setItem('capriniCareHistoryV1',JSON.stringify(a))}
+
 function careData(){return {id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),hn:$('hn').value.trim(),patientName:$('patientName').value.trim(),date:$('careDate').value||new Date().toISOString().slice(0,10),time:$('careTime').value||'',recorder:$('careRecorder').value.trim(),anklePump:$('anklePump').checked,turnLeft:$('turnLeft').checked,turnRight:$('turnRight').checked,turnSupine:$('turnSupine').checked,unable:$('unable').checked,response:$('careResponse').value.trim(),reason:$('careReason').value.trim(),savedAt:new Date().toLocaleString('th-TH')}}
-function renderCareHistory(){
- const a=getCareHistory().sort((x,y)=>(y.date+y.time).localeCompare(x.date+x.time));const root=$('careHistory');root.innerHTML='';
+
+async function renderCareHistory(){
+ const root=$('careHistory');root.innerHTML='<div class="empty">กำลังโหลดบันทึกกิจกรรม…</div>';
+ let a;try{a=await listRecords('care','capriniCareHistoryV1')}catch(e){root.innerHTML='<div class="empty">โหลดบันทึกกิจกรรมไม่สำเร็จ: '+e.message+'</div>';return}
+ a.sort((x,y)=>(y.date+y.time).localeCompare(x.date+x.time));root.innerHTML='';
  if(!a.length){root.innerHTML='<div class="empty">ยังไม่มีบันทึกกิจกรรม</div>';return}
  const table=document.createElement('table');table.innerHTML='<thead><tr><th>วันที่/เวลา</th><th>HN/รหัส</th><th>กิจกรรม</th><th>ผู้บันทึก</th><th>จัดการ</th></tr></thead>';
  const body=document.createElement('tbody');
  a.forEach(r=>{const tr=document.createElement('tr');const acts=[r.anklePump?'ขยับข้อเท้า':'',r.turnLeft?'ตะแคงซ้าย':'',r.turnRight?'ตะแคงขวา':'',r.turnSupine?'นอนหงาย/ปรับท่า':'',r.unable?'ทำไม่ได้/มีข้อห้าม':''].filter(Boolean).join(', ')||'-';
  [r.date+' '+(r.time||''),r.hn||'-',acts,r.recorder||'-'].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.appendChild(td)});
- const td=document.createElement('td');const del=document.createElement('button');del.className='danger';del.textContent='ลบ';del.onclick=()=>{if(confirm('ลบบันทึกกิจกรรมนี้หรือไม่?')){setCareHistory(getCareHistory().filter(x=>x.id!==r.id));renderCareHistory()}};td.appendChild(del);tr.appendChild(td);body.appendChild(tr)});
+ const td=document.createElement('td');const del=document.createElement('button');del.className='danger';del.textContent='ลบ';del.onclick=async()=>{if(confirm(sbReady()?'ลบบันทึกกิจกรรมนี้? มีผลกับผู้ใช้ทุกคน':'ลบบันทึกกิจกรรมนี้?')){try{await deleteRecord('care',r.id,'capriniCareHistoryV1');await renderCareHistory()}catch(e){alert('ลบไม่สำเร็จ: '+e.message)}}};td.appendChild(del);tr.appendChild(td);body.appendChild(tr)});
  table.appendChild(body);root.appendChild(table)
 }
-$('saveCare').onclick=()=>{const status=$('careStatus');try{const r=careData();const a=getCareHistory();a.push(r);setCareHistory(a);renderCareHistory();status.className='save-status ok';status.textContent='บันทึกกิจกรรมแล้วในเบราว์เซอร์/อุปกรณ์นี้';}catch(e){status.className='save-status err';status.textContent='บันทึกไม่สำเร็จ กรุณาเปิดไฟล์ผ่านเว็บเบราว์เซอร์ที่รองรับ';}};
+
+
+$('saveCare').onclick=async()=>{const status=$('careStatus');try{const r=careData();await saveRecord('care',r,'capriniCareHistoryV1');await renderCareHistory();status.className='save-status ok';status.textContent=sbReady()?'บันทึกกิจกรรมในฐานข้อมูลส่วนกลางแล้ว':'บันทึกกิจกรรมเฉพาะอุปกรณ์นี้แล้ว';}catch(e){status.className='save-status err';status.textContent='บันทึกไม่สำเร็จ: '+e.message}};
+
 $('clearCare').onclick=()=>{['careTime','careRecorder','careResponse','careReason'].forEach(id=>$(id).value='');['anklePump','turnLeft','turnRight','turnSupine','unable'].forEach(id=>$(id).checked=false);$('careStatus').className='save-status';$('careStatus').textContent='';};
-$('exportCare').onclick=()=>{const a=getCareHistory();if(!a.length){alert('ยังไม่มีบันทึกกิจกรรมให้ส่งออก');return}const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';const rows=[['วันที่','เวลา','HN/รหัส','ชื่อผู้ป่วย','ขยับข้อเท้า','ตะแคงซ้าย','ตะแคงขวา','นอนหงาย/ปรับท่า','ทำไม่ได้/มีข้อห้าม','การตอบสนอง/คะแนนปวด','เหตุผล/ข้อควรระวัง','ผู้บันทึก','เวลาที่บันทึก'],...a.map(r=>[r.date,r.time,r.hn,r.patientName,r.anklePump?'ใช่':'ไม่',r.turnLeft?'ใช่':'ไม่',r.turnRight?'ใช่':'ไม่',r.turnSupine?'ใช่':'ไม่',r.unable?'ใช่':'ไม่',r.response,r.reason,r.recorder,r.savedAt])];const blob=new Blob(['\\ufeff'+rows.map(row=>row.map(esc).join(',')).join('\\r\\n')],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download='VTE_Mobility_Care_History.csv';link.click();URL.revokeObjectURL(url)};
+
+$('exportCare').onclick=async()=>{const a=await listRecords('care','capriniCareHistoryV1');if(!a.length){alert('ยังไม่มีบันทึกกิจกรรมให้ส่งออก');return}const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';const rows=[['วันที่','เวลา','HN/รหัส','ชื่อผู้ป่วย','ขยับข้อเท้า','ตะแคงซ้าย','ตะแคงขวา','นอนหงาย/ปรับท่า','ทำไม่ได้/มีข้อห้าม','การตอบสนอง/คะแนนปวด','เหตุผล/ข้อควรระวัง','ผู้บันทึก','เวลาที่บันทึก'],...a.map(r=>[r.date,r.time,r.hn,r.patientName,r.anklePump?'ใช่':'ไม่',r.turnLeft?'ใช่':'ไม่',r.turnRight?'ใช่':'ไม่',r.turnSupine?'ใช่':'ไม่',r.unable?'ใช่':'ไม่',r.response,r.reason,r.recorder,r.savedAt])];const blob=new Blob(['\ufeff'+rows.map(row=>row.map(esc).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download='VTE_Mobility_Care_History.csv';link.click();URL.revokeObjectURL(url)};
+
 $('checkAllVte').onclick=()=>document.querySelectorAll('.vteCheck').forEach(x=>x.checked=true);
 $('clearVte').onclick=()=>document.querySelectorAll('.vteCheck').forEach(x=>x.checked=false);
 $('careDate').value=new Date().toISOString().slice(0,10);
-renderCareHistory();
+initSharedConfig();renderCareHistory();
 
 $('date').value=new Date().toISOString().slice(0,10);updateScore();renderHistory();
 </script>
